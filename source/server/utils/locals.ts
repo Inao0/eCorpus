@@ -98,6 +98,29 @@ export function isCreator(req: Request, res:Response, next :NextFunction){
 }
 
 /**
+ * Checks if user.isCreator is true
+ * Not the same thing as canWrite() that checks if the user has write rights over a scene
+ */
+export function isManage(req: Request, res:Response, next :NextFunction){
+  res.append("Cache-Control", "private");
+  if ( isUserAtLeast((req.session as User), "manage") ) next();
+  else next(new UnauthorizedError());
+}
+
+/**
+ * Checks if user is a member of a group or is at least Manage
+ */
+export async function isMemberOrManage(req: Request, res:Response, next :NextFunction){
+  res.append("Cache-Control", "private");
+  let userManager = getUserManager(req);
+  let user = getUser(req)
+  let {group} = req.params;
+  const canSeeGroup = user && (await userManager.isMemberOfGroup(user.uid, group) || isUserAtLeast(user, "manage"));
+  if(canSeeGroup) next();
+  else next(new UnauthorizedError());
+}
+
+/**
  * Wraps middlewares to find if at least one passes
  * Usefull for conditional rate-limiting
  * @example either(isAdministrator, isUser, rateLimit({...}))

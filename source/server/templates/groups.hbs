@@ -1,0 +1,23 @@
+<h2>{{i18n "nav.groups"}}</h2>
+<div class="section" style="display: flex; flex-direction: row; flex-wrap: wrap; gap: .5rem;justify-content:center;">
+  {{#if manageAccess}}
+  <submit-fragment method="POST" action="/groups/" encoding="application/json" onsubmit="window.location.reload()">
+    <form>
+    <label class="form-item">
+      <input id="new-group" name="name" type="text" value="" placeholder="{{i18n " fields.group"}}"/>
+      <button type="submit" class="btn btn-main btn-addon"><ui-icon name="plus"></ui-icon></button>
+    </label>
+  </form>
+  </submit-fragment>
+  {{/if}}
+  {{#each groups}}
+
+
+  <a class="btn" style="overflow: hidden; text-overflow:ellipsis" href="/ui/groups/{{encodeURIComponent group_name}}">
+    {{group_name}}
+  </a>
+  {{/each}}
+  {{#unless groups.length}}
+  <p>No groups found on this instance.</p>
+  {{/unless}}
+</div>

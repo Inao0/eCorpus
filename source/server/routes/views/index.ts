@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { canRead, getHost, canWrite, getSession, getVfs, getUser, isAdministrator, getUserManager, canAdmin, getLocals, canonical } from "../../utils/locals.js";
+import { canRead, getHost, canWrite, getSession, getVfs, getUser, isAdministrator, getUserManager, canAdmin, getLocals, canonical, isMemberOrManage } from "../../utils/locals.js";
 import wrap from "../../utils/wrapAsync.js";
 import path from "path";
 import { Scene } from "../../vfs/types.js";
@@ -7,7 +7,7 @@ import { AccessType, toAccessLevel } from "../../auth/UserManager.js";
 import ScenesVfs from "../../vfs/Scenes.js";
 import scrapDoc from "../../utils/schema/scrapDoc.js";
 import { qsToBool, qsToInt } from "../../utils/query.js";
-import { UserRoles } from "../../auth/User.js";
+import { isUserAtLeast, UserRoles } from "../../auth/User.js";
 import { locales } from "../../utils/templates.js";
 
 
@@ -126,6 +126,32 @@ routes.get("/tags/:tag", wrap(async (req, res)=>{
     scenes,
   });
 }));
+
+routes.get("/groups", wrap(async (req, res)=>{
+  const groups = await getUserManager(req).getGroups();
+  let u = getUser(req);
+  res.render("groups", {
+    title: "eCorpus Groups",
+    groups,
+    manageAccess: u? isUserAtLeast(u,"manage"): false
+  });
+}));
+
+routes.get("/groups/:group", isMemberOrManage, wrap(async (req, res)=>{
+  const host = getHost(req);
+  const userManager = getUserManager(req);
+  const requester = getUser(req);
+  const {group} = req.params;
+  const groupObj = await userManager.getGroup(group, false);
+  res.render("group", {
+    name: groupObj.group_name,
+    id: groupObj.group_id,
+    manageAccess: requester? isUserAtLeast(requester, "manage"): false,
+    scenes: groupObj.scenes,
+    members: groupObj.members,
+  });
+}));
+
 
 routes.get("/scenes", wrap(async (req, res)=>{
   let host = getHost(req);

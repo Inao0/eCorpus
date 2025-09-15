@@ -1,0 +1,47 @@
+<h2>{{i18n "nav.group"}} : {{name}}</h2>
+<div class="two-columns">
+  <div class="section"
+    style="display: flex; flex-direction: column; flex-wrap: wrap; gap: .5rem;justify-content:center;">
+    <h3>{{i18n "nav.members"}}</h3>
+
+    {{#if manageAccess}}
+    <submit-fragment submit="members" method="PATCH" action="/groups/{{name}}" encoding="application/json" class="row">
+      <form>
+        <label class="form-item">
+          <input id="new-member" name="members" type="text" value="" placeholder="{{i18n " fields.group"}}" />
+          <button type="submit" class="btn btn-main btn-addon"><ui-icon name="plus"></ui-icon></button>
+          <ul class="people_list">
+            {{#each members}}
+            <li> {{> inputs/checkbox name="members" selected=true value=. aria-label=. }} {{this}}
+            </li>
+            {{/each}}
+          </ul>
+
+        </label>
+      </form>
+    </submit-fragment>
+    {{else}}
+
+
+    {{/if}}
+  </div>
+
+  <div class="section"
+    style="display: flex; flex-direction: column; flex-wrap: wrap; gap: .5rem;justify-content:center;">
+    <h3>{{i18n "nav.scenes"}}</h3>
+    {{!-- {{#if manageAccess}}
+    <submit-fragment method="POST" action="/groups/" encoding="application/json">
+      <form>
+        <label class="form-item">
+          <input id="new-group" name="name" type="text" value="" placeholder="{{i18n " fields.group"}}" />
+          <button type="submit" class="btn btn-main btn-addon"><ui-icon name="plus"></ui-icon></button>
+        </label>
+      </form>
+    </submit-fragment> {{/if}} --}}
+
+    <a class="btn" style="overflow: hidden; text-overflow:ellipsis" href="/ui/groups/{{encodeURIComponent group_name}}">
+      {{name}}
+    </a>
+    <p> id: {{id}}</p>
+  </div>
+</div>

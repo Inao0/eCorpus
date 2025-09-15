@@ -9,6 +9,8 @@ import User, {SafeUser, StoredUser, UserLevels, UserRole, UserRoles} from "./Use
 
 import openDatabase, {Database, DbController, DbOptions} from "../vfs/helpers/db.js";
 import errors, { expandSQLError } from "../vfs/helpers/errors.js";
+import StoredGroup from "./Group.js";
+import { group } from "console";
 
 
 const scrypt :(
@@ -85,8 +87,11 @@ export default class UserManager extends DbController {
     username(username :string|any){
       return typeof username ==="string" &&/^[-\w]{3,40}$/.test(username)
     },
-    password(password:string|any){
-      return typeof password ==="string" && 8 <= password.length
+    groupName(groupName: string | any) {
+      return typeof groupName === "string" && /^[-\w]{3,40}$/.test(groupName)
+    },
+    password(password: string | any) {
+      return typeof password === "string" && 8 <= password.length
     },
     email(email:string|any){
       return typeof email === "string" && /^[^@]+@[^@]+\.[^@]+$/.test(email);
@@ -361,7 +366,8 @@ export default class UserManager extends DbController {
           WHEN (SELECT level FROM users WHERE user_id = $2) IS NOT NULL THEN scenes.default_access 
           ELSE 0 END,
         scenes.public_access,
-        user_is_admin_level.level
+        user_is_admin_level.level,
+        groups.access_level
       ) AS level
       FROM
         scenes
@@ -371,11 +377,16 @@ export default class UserManager extends DbController {
           WHERE user_id = $2
         ) AS user_is_admin_level ON TRUE
         LEFT OUTER JOIN users_acl ON (fk_scene_id = scenes.scene_id AND fk_user_id = $2)
-      WHERE ${typeof scene ==="number"? 
-          "scene_id = $1"
-        : "scene_name = $1" }
-      ) AS levels` : 
-       // Request when no uid :
+        LEFT OUTER JOIN (
+          SELECT * 
+            FROM groups_acl INNER JOIN groups_membership ON (groups_acl.fk_group_id = groups_membership.fk_group_id)
+           WHERE fk_user_id = $2)
+          AS groups ON (groups.fk_scene_id = scenes.scene_id AND groups.fk_user_id = $2) 
+      WHERE ${typeof scene === "number" ?
+        "scene_id = $1"
+        : "scene_name = $1"}
+      ) AS levels` :
+      // Request when no uid :
       `SELECT public_access as level
       FROM scenes
       WHERE ${typeof scene ==="number"? 
@@ -417,7 +428,7 @@ export default class UserManager extends DbController {
     
   }
 
-  async setPublicAccess(scene: string|number, role:"none"|"read"):Promise<void>{
+  async setPublicAccess(scene: string | number, role: "none" | "read"): Promise<void> {
     let is_id = typeof scene === "number";
     let level = toAccessLevel(role)
     if(level < 0 || 1 < level) throw new BadRequestError(`Can't set scene public access to ${role}`)
@@ -470,5 +481,201 @@ export default class UserManager extends DbController {
     let key = randomBytes(16);
     await this.db.run(`INSERT INTO keys (key_data) VALUES ($1);`, [key]);
     return key.toString("base64");
+  }
+
+  async addGroup(groupName: string) {
+    if (!UserManager.isValid["groupName"](groupName)) throw new Error(`Invalid group name : ${groupName}`);
+    let groupId;
+    for (let i = 0; i < 3; i++) {
+      //Retry 3 times in case we are unlucky with the RNG
+      try {
+        /* 48bits is a safe integer (ie. less than 2^53-1)*/
+        groupId = Uid.make();
+        await this.db.run(`
+          INSERT INTO groups (group_id, group_name)
+          VALUES ($1, $2)
+        `, [
+          groupId,
+          groupName
+        ]); break;
+      } catch (e: any) {
+        if (e.code == errors.unique_violation && e.constraint === "groups_group_id_key") continue;
+        else throw e;
+      }
+    }
+    return new StoredGroup({ groupName, groupId: groupId! });
+  }
+
+  async removeGroup(uid: number) {
+    let r = await this.db.run(`DELETE FROM groups WHERE group_id = $1`, [uid.toString(10)]);
+    if (!r || !r.changes) throw new NotFoundError(`No group to delete with uid ${uid}`);
+  }
+
+  // safe 
+  async getGroup(groupName: string, safe: boolean = true): Promise<StoredGroup> {
+    if (!UserManager.isValid["groupName"](groupName)) throw new Error(`Invalid group name : ${groupName}`);
+    let group;
+    if (safe) {
+      group = (await this.db.get<StoredGroup>(`SELECT * FROM groups WHERE group_name = $1`, [groupName]));
+    } else {
+      group = (await this.db.get<StoredGroup>(
+        `SELECT 
+        group_name,
+        group_id, 
+        jsonb_object_agg (COALESCE(scene_name,''::text), level)  - '' as scenes,
+        array_remove(ARRAY_AGG(username), NULL)  AS members 
+        FROM groups 
+        LEFT JOIN groups_acl ON groups_acl.fk_group_id = group_id
+        LEFT JOIN scenes ON fk_scene_id = scene_id 
+        LEFT JOIN groups_membership ON groups_membership.fk_group_id = group_id
+        LEFT JOIN users ON groups_membership.fk_user_id = user_id
+        WHERE group_name = $1
+        GROUP BY group_name, group_id`, [groupName]))
+    }
+    if (!group) throw new NotFoundError(`no group named ${groupName}`);
+    return group;
+  }
+
+  async getGroups(): Promise<StoredGroup[]> {
+    return (await this.db.all<StoredGroup>(`
+      SELECT * FROM groups`));
+  }
+
+
+  async addMemberToGroup(user: number | string, group_id: number) {
+    console.log("group_id", group_id);
+    try {
+      if (typeof (user) == "number") {
+        let r = await this.db.run(` 
+      INSERT INTO groups_membership (fk_group_id, fk_user_id)
+      VALUES ($1, $2)`,
+          [group_id, user])
+      } else {
+        let r = await this.db.run(` 
+      INSERT INTO groups_membership (fk_group_id, fk_user_id)
+      SELECT $1, user_id FROM users WHERE username = $2`,
+          [group_id, user]);
+        if (!r || !r.changes) throw new NotFoundError(`No user ${user} to add `);
+      }
+    }
+    catch (e: any) {
+      if (e.code != errors.unique_violation) {
+        throw e
+      }
+    }
+  }
+
+  async removeMemberFromGroup(user: number | string, group_id: number) {
+    let user_id = `(${(typeof user === "number") ?
+      `SELECT $1::bigint AS user_id` :
+      `SELECT user_id FROM users WHERE username = $1`})`;
+    let r = await this.db.run(`
+      DELETE FROM groups_membership 
+      WHERE fk_user_id = ${user_id} AND fk_group_id = $2`, [user, group_id]);
+    if (!r || !r.changes) throw new NotFoundError(`No user ${user} to delete `);
+  }
+
+  async getMembersOfGroup(group_id: number) {
+    let r = (await this.db.all<StoredUser>(` 
+      SELECT
+        user_id, username, level, email
+      FROM 
+        users INNER JOIN groups_membership ON user_id = fk_user_id
+      WHERE fk_group_id = $1
+    `, [group_id])).map((u) => UserManager.deserialize(u));
+    return r;
+  }
+
+  async isMemberOfGroup(user: number | string, group: number | string) {
+    let res: Number;
+    if (typeof (user) == "number") {
+      res = (await this.db.get<Number>(`SELECT fk_user_id FROM groups_membership ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND fk_user_id = $1`, [user, group]));
+    } else {
+      res = (await this.db.get<Number>(`SELECT fk_user_id FROM groups_membership  JOIN users ON fk_user_id = user_id  ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND username = $1`, [user, group]));
+    }
+    console.log(res);
+    return (typeof (res) == "number")
+  }
+
+
+  /**
+ * patches permissions on a scene for a given group.
+ * Groupnames are converted to IDs before being used.
+ * > As per [rfc7396](https://datatracker.ietf.org/doc/html/rfc7396), 
+ * > Null values in the merge patch are given special meaning to indicate the removal
+ * > of existing values in the target.
+ * 
+ * @param scene scene name or id
+ * @param user username or user_id to grant access to
+ * @param role 
+ */
+  async grantGroup(scene: string | number, group: string | number, role: AccessType) {
+    if (!isAccessType(role)) throw new BadRequestError(`Bad access type requested : ${role}`);
+    let scene_id = `(${(typeof scene === "number") ? `SELECT $1::bigint AS scene_id` : `SELECT scene_id FROM scenes WHERE scene_name = $1`})`
+    let group_id = `(${(typeof group === "number") ? `SELECT $2::bigint AS group_id` : `SELECT group_id FROM groups WHERE group_name = $2`})`;
+    let level = toAccessLevel(role);
+    if (0 < level) {
+      try {
+        await this.db.run(`
+          INSERT INTO groups_acl (fk_group_id, fk_scene_id, access_level)
+          SELECT ${group_id}, ${scene_id}, $3
+          ON CONFLICT (fk_group_id, fk_scene_id) DO UPDATE SET access_level = EXCLUDED.access_level
+        `, [
+          scene,
+          group,
+          level
+        ]);
+      } catch (e: any) {
+        if (e.code === errors.not_null_violation && e.table === "groups_acl" && e.column === "fk_group_id") {
+          throw new NotFoundError(`Group ID can't be null`);
+        } else if (e.code === errors.foreign_key_violation && e.table === "groups_acl" && e.constraint === 'users_acl_fk_group_id_fkey') {
+          throw new NotFoundError(`Invalid group ID ${group}`);
+        } else if (e.code === errors.not_null_violation && e.table === "groups_acl" && e.column === "fk_scene_id") {
+          throw new NotFoundError(`Scene ${scene} does not exist`);
+        }
+        throw e;
+      }
+    } else {
+      let r = await this.db.run(`
+        DELETE FROM groups_acl
+        WHERE (fk_scene_id IN ${scene_id} AND fk_group_id IN ${group_id})
+      `, [
+        scene,
+        group,
+      ]);
+      if (!r || !r.changes) {
+        throw new NotFoundError(`Can't find matching group or scene`);
+      }
+    }
+  }
+
+
+  /**
+   * Get all group access rights for a scene.
+   * Access to this should be externally restricted to users with READ rights over this scene.
+   * 
+   * For this reason, this method is not really made safe: It won't throw a 404 if the requested scene doesn't exist.
+   * @see https://www.sqlite.org/json1.html#jeach for json_each documentation
+   */
+  async getGroupsPermissions(nameOrId: string | number): Promise<{ uid: number, groupName: string, access: AccessType }[]> {
+    let key = ((typeof nameOrId == "number") ? "scene_id" : "scene_name");
+    let r = await this.db.all<{ uid: string, group_name: string, level: number }>(`
+      SELECT 
+        groups.group_id AS uid,
+        groups.group_name AS group_name,
+        groups_acl.access_level AS level
+      FROM 
+        scenes
+        INNER JOIN groups_acl ON groups_acl.fk_scene_id = scenes.scene_id
+        INNER JOIN groups ON groups_acl.fk_user_id = groups.user_id
+      WHERE scenes.${key} = $1
+    `, [
+      (typeof nameOrId == "number") ? nameOrId.toString(10) : nameOrId,
+    ]);
+    return r.map(l => ({
+      uid: parseInt(l.uid),
+      groupName: l.group_name,
+      access: AccessTypes[l.level + 1]
+    }));
   }
 }

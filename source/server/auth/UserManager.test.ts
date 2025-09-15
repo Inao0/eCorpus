@@ -10,6 +10,7 @@ import openDatabase, { Database } from "../vfs/helpers/db.js";
 import { Uid } from "../utils/uid.js";
 import { randomBytes } from "crypto";
 import errors from "../vfs/helpers/errors.js";
+import Group from "./Group.js";
 
 describe("UserManager static methods", function(){
   describe("parsePassword()", function(){
@@ -67,7 +68,7 @@ describe("UserManager static methods", function(){
       ],
       email:[
         ["foo@example.com", true],
-      ]
+      ], 
     };
     for(let key of Object.keys(tests) as [keyof typeof UserManager.isValid]){
       let values = (tests as any)[key] as [string, boolean][];
@@ -381,4 +382,121 @@ describe("UserManager methods", function(){
       expect(keys[1]).to.equal(firstKey);
     });
   });
+
+  describe("User groups", function () {
+    it("creates a group", async function () {
+      let group = await expect(userManager.addGroup("Foo")).to.be.fulfilled;
+      expect(group).to.have.property("group_name", "Foo");
+      let g = await userManager.getGroup("Foo");
+      expect(g).to.be.ok;
+      expect(g).to.have.property("group_name", "Foo");
+      expect(g).to.have.property("group_id");
+    })
+
+    it("remove a group", async function () {
+      let group = await userManager.addGroup("Foo2");
+      await userManager.removeGroup(group.group_id);
+      await expect(userManager.getGroup("Foo2")).to.be.rejectedWith(NotFoundError);
+    });
+
+    it("Add a member to a group using uid", async function () {
+      let group = await userManager.addGroup("Foo3");
+      let user = await userManager.addUser("Member-1", "abcdefghij");
+      user.password = undefined;
+
+      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
+      const members = await userManager.getMembersOfGroup(group.group_id);
+      expect(members.length).to.be.equal(1);
+      expect(members[0]).to.deep.equals(user);
+    })
+
+    it("Add a member to a group using username", async function () {
+      let group = await userManager.addGroup("Foo4");
+      let user = await userManager.addUser("Member-2", "abcdefghij");
+      user.password = undefined;
+
+      await expect(userManager.addMemberToGroup(user.username, group.group_id)).to.be.fulfilled;
+      const members = await userManager.getMembersOfGroup(group.group_id);
+      expect(members.length).to.be.equal(1);
+      expect(members[0]).to.deep.equals(user);
+    })
+
+    it("Add a member to a group twice", async function () {
+      let group = await userManager.addGroup("Foo5");
+      let user = await userManager.addUser("Member-3", "abcdefghij");
+      user.password = undefined;
+
+      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
+      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
+      const members = await expect(userManager.getMembersOfGroup(group.group_id)).to.be.fulfilled;
+      expect(members.length).to.be.equal(1);
+      expect(members[0]).to.deep.equals(user);
+    })
+
+    it("Get Members of an empty group", async function () {
+      let group = await userManager.addGroup("Foo6");
+      const members = await expect(userManager.getMembersOfGroup(group.group_id)).to.be.fulfilled;
+      expect(members).to.be.deep.equal([]);
+    })
+
+    describe("grantGroup()", async function () {
+
+      let group: Group, member: SafeUser, _id = 1;
+      this.beforeAll(async function () {
+        await this.db.run(`INSERT INTO scenes (scene_id, scene_name, public_access) VALUES ($1, $2, $3)`, [Uid.make().toString(10), 'foo-grant-group-access-rights', 1]);
+        await this.db.run(`INSERT INTO scenes (scene_id, scene_name, public_access) VALUES ($1, $2, $3)`, [Uid.make().toString(10), 'foo-grant-group-access-rights-private', 0]);
+        member = await userManager.addUser("maelle", "12345678");
+      })
+      this.beforeEach(async function () {
+        group = await userManager.addGroup("foo-grant-" + (++_id).toString(16).padStart(4, "0"));
+        userManager.addMemberToGroup(member.uid, group.group_id);
+      });
+
+      it("can set group permissions by groupName", async function () {
+        for (let role of AccessTypes.slice(2).reverse()) {
+          // we use reverse so that we do not set permission to "none" when there is no permission existing.
+          await userManager.grantGroup("foo-grant-group-access-rights-private", group.group_name, role);
+          let access = await userManager.getAccessRights("foo-grant-group-access-rights-private", member.uid);
+          expect(access, `Access level ${role} was requested. Received ${access}`).to.equal(role);
+        }
+      });
+      it("can set group permissions by uid", async function () {
+        await userManager.grantGroup("foo-grant-group-access-rights-private", group.group_id, "write");
+        let access = await userManager.getAccessRights("foo-grant-group-access-rights-private", member.uid);
+        expect(access, `Access level write was requested. Received ${access}`).to.equal("write");
+      });
+
+      it("can unset group permissions", async function () {
+        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, "write");
+        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, null);
+        let access = await userManager.getAccessRights("foo-grant-group-access-rights", member.uid);
+        expect(access).to.equal("read"); // default*/
+      });
+
+      it("can get scenes and user when getting the group with permissions", async function () {
+        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, "write");
+        let result_group = await userManager.getGroup(group.group_name, false);
+        console.log(result_group);
+        expect(result_group.scenes).to.have.property("foo-grant-group-access-rights");
+        expect((result_group.scenes as any)["foo-grant-group-access-rights"]).to.be.equal(toAccessLevel("write"));
+        expect(result_group.members).to.include("maelle");
+      });
+
+      it("can't set permissions to none if there was no specific permissions", async function () {
+        await expect(userManager.grant("foo-grant-group-access-rights-private", group.group_name, "none")).to.be.rejectedWith("404");
+      });
+
+      it("can't provide unsupported role", async function () {
+        await expect(userManager.grant("foo-grant-group-access-rights", group.group_name, "bar" as any)).to.be.rejectedWith("400");
+      });
+
+      it("can't provide bad group name", async function () {
+        await expect(userManager.grant("foo-grant-group-access-rights", "oscar", "read")).to.be.rejectedWith("404");
+      });
+
+      it("can't provide bad scene name", async function () {
+        await expect(userManager.grant("foo-grant-group-access-rights-xxx", group.group_name, "read")).to.be.rejectedWith("404");
+      });
+    })
+  })
 });
