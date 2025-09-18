@@ -522,7 +522,7 @@ export default class UserManager extends DbController {
         `SELECT 
         group_name,
         group_id, 
-        jsonb_object_agg (COALESCE(scene_name,''::text), level)  - '' as scenes,
+        jsonb_object_agg (COALESCE(scene_name,''::text), access_level)  - '' as scenes,
         array_remove(ARRAY_AGG(username), NULL)  AS members 
         FROM groups 
         LEFT JOIN groups_acl ON groups_acl.fk_group_id = group_id
@@ -531,6 +531,9 @@ export default class UserManager extends DbController {
         LEFT JOIN users ON groups_membership.fk_user_id = user_id
         WHERE group_name = $1
         GROUP BY group_name, group_id`, [groupName]))
+        group.scenes = group.scenes ?  
+        Object.entries(group.scenes).map(([s, a], i) => {return {scene: s, access: AccessTypes[a+1]}})
+        : [];
     }
     if (!group) throw new NotFoundError(`no group named ${groupName}`);
     return group;
