@@ -4,16 +4,22 @@ import wrap from "../../utils/wrapAsync.js";
 import bodyParser from "body-parser";
 
 import {isManage, isUser } from "../../utils/locals.js";
-import postGroup from "./post.js";
+import postGroups from "./post.js";
 import getGroups from "./get.js";
 import getGroup from "./group/get.js";
-import patchGroup from "./group/patch.js";
+import putMember from "./group/member/put.js";
+import deleteMember from "./group/member/delete.js";
+import deleteGroup from "./group/delete.js";
 
 const router = Router();
 
-router.get("/", isUser, wrap(getGroups));
-router.post("/", isManage, bodyParser.json(), wrap(postGroup));
-router.get("/:group", isUser, wrap(getGroup));
-router.patch("/:group", isManage, bodyParser.json(), wrap(patchGroup));
+router.use("/", isManage);
+
+router.get("/", wrap(getGroups));
+router.post("/", bodyParser.json(), wrap(postGroups));
+router.get("/:group", wrap(getGroup));
+router.delete("/:group", wrap(deleteGroup))
+router.put("/:group/:member", wrap(putMember));
+router.delete("/:group/:member", wrap(deleteMember));
 
 export default router;

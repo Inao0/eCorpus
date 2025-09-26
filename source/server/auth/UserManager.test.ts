@@ -385,59 +385,150 @@ describe("UserManager methods", function(){
 
   describe("User groups", function () {
     it("creates a group", async function () {
-      let group = await expect(userManager.addGroup("Foo")).to.be.fulfilled;
-      expect(group).to.have.property("group_name", "Foo");
+      let group: Group = await expect(userManager.addGroup("Foo")).to.be.fulfilled;
+      expect(group).to.have.property("groupName", "Foo");
       let g = await userManager.getGroup("Foo");
       expect(g).to.be.ok;
-      expect(g).to.have.property("group_name", "Foo");
-      expect(g).to.have.property("group_id");
+      expect(g).to.have.property("groupName", "Foo");
+      expect(g).to.have.property("groupUid", group.groupUid);
     })
 
-    it("remove a group", async function () {
+    it("remove a group using uid", async function () {
       let group = await userManager.addGroup("Foo2");
-      await userManager.removeGroup(group.group_id);
+      await userManager.removeGroup(group.groupUid);
       await expect(userManager.getGroup("Foo2")).to.be.rejectedWith(NotFoundError);
     });
 
-    it("Add a member to a group using uid", async function () {
-      let group = await userManager.addGroup("Foo3");
-      let user = await userManager.addUser("Member-1", "abcdefghij");
-      user.password = undefined;
+    it("remove a group using name", async function () {
+      let group = await userManager.addGroup("Foo2bis");
+      await userManager.removeGroup(group.groupName);
+      await expect(userManager.getGroup("Foo2")).to.be.rejectedWith(NotFoundError);
+    });
 
-      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
-      const members = await userManager.getMembersOfGroup(group.group_id);
-      expect(members.length).to.be.equal(1);
-      expect(members[0]).to.deep.equals(user);
-    })
+    it("Can get a list of all groups", async function () {
+      let group1 = await userManager.addGroup("Foo3_cngn5efs4");
+      let group2 = await userManager.addGroup("Foo3_5lxnd5fj5");
+      let groups = await userManager.getGroups();
+      expect(groups.length).to.be.greaterThan(2);
+      expect(groups).to.deep.include(group1)
+      expect(groups).to.deep.include(group2)
+    });
 
-    it("Add a member to a group using username", async function () {
-      let group = await userManager.addGroup("Foo4");
-      let user = await userManager.addUser("Member-2", "abcdefghij");
-      user.password = undefined;
+    describe("managing members", async function () {
+      let group: Group, member: User, notMember: User;
+      this.beforeAll(async function () {
+        group = await userManager.addGroup("Foo3");
+        member = await userManager.addUser("Member-0", "abcdefghij");
+        notMember = await userManager.addUser("NotMember-0", "abcdefghij");
+        await userManager.addMemberToGroup(member.username, group.groupUid);
+      })
 
-      await expect(userManager.addMemberToGroup(user.username, group.group_id)).to.be.fulfilled;
-      const members = await userManager.getMembersOfGroup(group.group_id);
-      expect(members.length).to.be.equal(1);
-      expect(members[0]).to.deep.equals(user);
-    })
+      it("Add a member to a group using uid", async function () {
+        let user = await userManager.addUser("Member-1", "abcdefghij");
+        let members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.not.include(user.username);
 
-    it("Add a member to a group twice", async function () {
-      let group = await userManager.addGroup("Foo5");
-      let user = await userManager.addUser("Member-3", "abcdefghij");
-      user.password = undefined;
+        await expect(userManager.addMemberToGroup(user.uid, group.groupUid)).to.be.fulfilled;
+        members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.exist;
+        expect(members).to.include(user.username);
+      });
 
-      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
-      await expect(userManager.addMemberToGroup(user.uid, group.group_id)).to.be.fulfilled;
-      const members = await expect(userManager.getMembersOfGroup(group.group_id)).to.be.fulfilled;
-      expect(members.length).to.be.equal(1);
-      expect(members[0]).to.deep.equals(user);
-    })
+      it("Add a member to a group using username", async function () {
+        let user = await userManager.addUser("Member-2", "abcdefghij");
+        let members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.not.include(user.username);
 
-    it("Get Members of an empty group", async function () {
-      let group = await userManager.addGroup("Foo6");
-      const members = await expect(userManager.getMembersOfGroup(group.group_id)).to.be.fulfilled;
-      expect(members).to.be.deep.equal([]);
-    })
+        await expect(userManager.addMemberToGroup(user.username, group.groupUid)).to.be.fulfilled;
+        members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.exist;
+        expect(members).to.include(user.username);
+      })
+
+      it("Add a member to a group twice", async function () {
+        let user = await userManager.addUser("Member-3", "abcdefghij");
+        let members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.not.include(user.username);
+
+        await expect(userManager.addMemberToGroup(user.uid, group.groupUid)).to.be.fulfilled;
+        await expect(userManager.addMemberToGroup(user.uid, group.groupUid)).to.be.fulfilled;
+        members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.exist;
+        expect(members).to.include(user.username);
+        expect(members!.filter((each: string) => each == user.username)).to.have.lengthOf(1);
+      })
+
+
+      it("Add inexisting user as member fails", async function () {
+        await expect(userManager.addMemberToGroup("not_a_user", group.groupUid)).to.be.rejectedWith("404");
+      })
+
+      it("Add member to inexisting group fails", async function () {
+        await expect(userManager.addMemberToGroup(member.username, "not_a_group")).to.be.rejectedWith("404");
+      })
+
+      it("Members of an empty group is empty collection", async function () {
+        let group = await userManager.addGroup("Foo4");
+        const members = (await userManager.getGroup(group.groupName)).members;
+        expect(members).to.exist;
+        expect(members).to.be.deep.equal([]);
+      })
+
+      it("Can check if a member is part of a group using uid and group name", async function () {
+        let isMember = await expect(userManager.isMemberOfGroup(member.uid, group.groupName)).to.be.fulfilled;
+        expect(isMember);
+        isMember = await expect(userManager.isMemberOfGroup(notMember.uid, group.groupName)).to.be.fulfilled;
+        expect(notMember).not;
+      })
+
+      it("Can check if a member is part of a group using username and group name", async function () {
+        let isMember = await expect(userManager.isMemberOfGroup(member.username, group.groupName)).to.be.fulfilled;
+        expect(isMember);
+        isMember = await expect(userManager.isMemberOfGroup(notMember.username, group.groupName)).to.be.fulfilled;
+        expect(notMember).not;
+      })
+
+      it("Can check if a member is part of a group using uid and group uid", async function () {
+        let isMember = await expect(userManager.isMemberOfGroup(member.uid, group.groupUid)).to.be.fulfilled;
+        expect(isMember);
+        isMember = await expect(userManager.isMemberOfGroup(notMember.uid, group.groupUid)).to.be.fulfilled;
+        expect(notMember).not;
+      })
+
+      it("Can check if a member is part of a group using username and group uid", async function () {
+        let isMember = await expect(userManager.isMemberOfGroup(member.username, group.groupUid)).to.be.fulfilled;
+        expect(isMember);
+        isMember = await expect(userManager.isMemberOfGroup(notMember.username, group.groupUid)).to.be.fulfilled;
+        expect(notMember).not;
+      })
+
+      it("Remove a member to a group using uid", async function () {
+        let user = await userManager.addUser("Member-4", "abcdefghij");
+        await userManager.addMemberToGroup(user.uid, group.groupUid);
+        expect(await userManager.isMemberOfGroup(user.uid, group.groupUid));
+
+        await expect(userManager.removeMemberFromGroup(user.uid, group.groupUid)).to.be.fulfilled;
+        expect(await userManager.isMemberOfGroup(user.uid, group.groupUid)).not;
+      });
+
+      it("Remove a member to a group using username", async function () {
+        let user = await userManager.addUser("Member-5", "abcdefghij");
+        await userManager.addMemberToGroup(user.uid, group.groupUid);
+        expect(await userManager.isMemberOfGroup(user.username, group.groupUid));
+
+        await expect(userManager.removeMemberFromGroup(user.username, group.groupUid)).to.be.fulfilled;
+        expect(await userManager.isMemberOfGroup(user.username, group.groupUid)).not;
+      })
+
+      it("Remove an inexisting member from a group", async function () {
+        await expect(userManager.removeMemberFromGroup(notMember.username, group.groupUid)).to.be.rejectedWith("404");
+      })
+
+      it("Remove a member from a inexisting group", async function () {
+        await expect(userManager.removeMemberFromGroup(member.username, "not_a_group")).to.be.rejectedWith("404");
+      })
+    });
+
 
     describe("grantGroup()", async function () {
 
@@ -449,45 +540,45 @@ describe("UserManager methods", function(){
       })
       this.beforeEach(async function () {
         group = await userManager.addGroup("foo-grant-" + (++_id).toString(16).padStart(4, "0"));
-        userManager.addMemberToGroup(member.uid, group.group_id);
+        userManager.addMemberToGroup(member.uid, group.groupUid);
       });
 
       it("can set group permissions by groupName", async function () {
         for (let role of AccessTypes.slice(2).reverse()) {
           // we use reverse so that we do not set permission to "none" when there is no permission existing.
-          await userManager.grantGroup("foo-grant-group-access-rights-private", group.group_name, role);
+          await userManager.grantGroup("foo-grant-group-access-rights-private", group.groupName, role);
           let access = await userManager.getAccessRights("foo-grant-group-access-rights-private", member.uid);
           expect(access, `Access level ${role} was requested. Received ${access}`).to.equal(role);
         }
       });
       it("can set group permissions by uid", async function () {
-        await userManager.grantGroup("foo-grant-group-access-rights-private", group.group_id, "write");
+        await userManager.grantGroup("foo-grant-group-access-rights-private", group.groupUid, "write");
         let access = await userManager.getAccessRights("foo-grant-group-access-rights-private", member.uid);
         expect(access, `Access level write was requested. Received ${access}`).to.equal("write");
       });
 
       it("can unset group permissions", async function () {
-        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, "write");
-        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, null);
+        await userManager.grantGroup("foo-grant-group-access-rights", group.groupUid, "write");
+        await userManager.grantGroup("foo-grant-group-access-rights", group.groupUid, null);
         let access = await userManager.getAccessRights("foo-grant-group-access-rights", member.uid);
         expect(access).to.equal("read"); // default*/
       });
 
       it("can get scenes and user when getting the group with permissions", async function () {
-        await userManager.grantGroup("foo-grant-group-access-rights", group.group_id, "write");
-        let result_group = await userManager.getGroup(group.group_name, false);
-        console.log(result_group);
-        expect(result_group.scenes).to.have.property("foo-grant-group-access-rights");
-        expect((result_group.scenes as any)["foo-grant-group-access-rights"]).to.be.equal(toAccessLevel("write"));
+        await userManager.grantGroup("foo-grant-group-access-rights", group.groupUid, "write");
+        let result_group = await userManager.getGroup(group.groupName);
+        expect(result_group).to.have.property("scenes");
+        expect(result_group.scenes?.length).to.equal(1);
+        expect(result_group.scenes?.[0]).to.deep.equal({ scene: "foo-grant-group-access-rights", access: "write" });
         expect(result_group.members).to.include("maelle");
       });
 
       it("can't set permissions to none if there was no specific permissions", async function () {
-        await expect(userManager.grant("foo-grant-group-access-rights-private", group.group_name, "none")).to.be.rejectedWith("404");
+        await expect(userManager.grant("foo-grant-group-access-rights-private", group.groupName, "none")).to.be.rejectedWith("404");
       });
 
       it("can't provide unsupported role", async function () {
-        await expect(userManager.grant("foo-grant-group-access-rights", group.group_name, "bar" as any)).to.be.rejectedWith("400");
+        await expect(userManager.grant("foo-grant-group-access-rights", group.groupName, "bar" as any)).to.be.rejectedWith("400");
       });
 
       it("can't provide bad group name", async function () {
@@ -495,7 +586,7 @@ describe("UserManager methods", function(){
       });
 
       it("can't provide bad scene name", async function () {
-        await expect(userManager.grant("foo-grant-group-access-rights-xxx", group.group_name, "read")).to.be.rejectedWith("404");
+        await expect(userManager.grant("foo-grant-group-access-rights-xxx", group.groupName, "read")).to.be.rejectedWith("404");
       });
     })
   })

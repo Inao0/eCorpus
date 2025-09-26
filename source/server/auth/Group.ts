@@ -1,14 +1,26 @@
+import { AccessType, AccessTypes } from "./UserManager.js";
 
-export default class StoredGroup {
-    group_id: number;
-    group_name: string;
-    scenes? : Object;
+export default class Group {
+    groupUid: number;
+    groupName: string;
+    scenes? : {scene: string, access: AccessType}[];
     members? : string[];
 
-    constructor({ groupName, groupId }: {
-        groupName: string, groupId: number
-    }) {
-        this.group_name = groupName;
-        this.group_id = groupId;
+    constructor({ group_name, group_id, scenes, members}: StoredGroup) {
+        this.groupName = group_name;
+        this.groupUid = group_id;
+        if (scenes) {
+        this.scenes = Object.entries(scenes).map(([s, a], i) => {return {scene: s, access: AccessTypes[a+1]}});
+        }
+        if (members) this.members = members;
     }
+}
+
+
+
+export interface StoredGroup{
+  group_id :number;
+  group_name :string;
+  scenes?: Object;
+  members? : string[];
 }

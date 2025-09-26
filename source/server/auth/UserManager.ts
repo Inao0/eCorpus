@@ -4,12 +4,12 @@ import path from "path";
 import {promisify, callbackify} from "util";
 
 import uid, { Uid } from "../utils/uid.js";
-import { BadRequestError, InternalError, NotFoundError, UnauthorizedError } from "../utils/errors.js";
+import { BadRequestError, ConflictError, InternalError, NotFoundError, UnauthorizedError } from "../utils/errors.js";
 import User, {SafeUser, StoredUser, UserLevels, UserRole, UserRoles} from "./User.js";
 
 import openDatabase, {Database, DbController, DbOptions} from "../vfs/helpers/db.js";
 import errors, { expandSQLError } from "../vfs/helpers/errors.js";
-import StoredGroup from "./Group.js";
+import Group, { StoredGroup } from "./Group.js";
 import { group } from "console";
 
 
@@ -84,11 +84,8 @@ export default class UserManager extends DbController {
   }
 
   static isValid = {
-    username(username :string|any){
-      return typeof username ==="string" &&/^[-\w]{3,40}$/.test(username)
-    },
-    groupName(groupName: string | any) {
-      return typeof groupName === "string" && /^[-\w]{3,40}$/.test(groupName)
+    username(username: string | any) {
+      return typeof username === "string" && /^[-\w]{3,40}$/.test(username)
     },
     password(password: string | any) {
       return typeof password === "string" && 8 <= password.length
@@ -405,25 +402,41 @@ export default class UserManager extends DbController {
    * For this reason, this method is not really made safe: It won't throw a 404 if the requested scene doesn't exist.
    * @see https://www.sqlite.org/json1.html#jeach for json_each documentation
    */
-  async getPermissions(nameOrId :string|number) :Promise<{uid:number, username :string, access :AccessType}[]>{
-    let key = ((typeof nameOrId =="number")? "scene_id":"scene_name");
-    let r = await this.db.all<{uid:string, username:string, level:number}>(`
+  async getPermissions(nameOrId: string | number): Promise<({ uid: number, username: string, access: AccessType } | { groupUid: number, groupName: string, access: AccessType })[]> {
+    let key = ((typeof nameOrId == "number") ? "scene_id" : "scene_name");
+    let r = await this.db.all<{ uid: string, username: string | null, group_name: string | null, level: number }>(`
       SELECT 
         users.user_id AS uid,
         users.username AS username,
+        NULL AS group_name,
         users_acl.access_level AS level
       FROM 
         scenes
         INNER JOIN users_acl ON users_acl.fk_scene_id = scenes.scene_id
         INNER JOIN users ON users_acl.fk_user_id = users.user_id
       WHERE scenes.${key} = $1
+      UNION
+        SELECT 
+        groups.group_id AS uid,
+        NULL AS username,
+        groups.group_name AS group_name,
+        groups_acl.access_level AS level
+      FROM 
+        scenes
+        INNER JOIN groups_acl ON groups_acl.fk_scene_id = scenes.scene_id
+        INNER JOIN groups ON groups_acl.fk_group_id = groups.group_id
+      WHERE scenes.${key} = $1
     `, [
-      (typeof nameOrId =="number")?nameOrId.toString(10): nameOrId,
+      (typeof nameOrId == "number") ? nameOrId.toString(10) : nameOrId,
     ]);
-    return r.map(l=>({
-      uid:parseInt(l.uid),
-      username:l.username,
-      access: AccessTypes[l.level+1]
+    return r.map(l => (l.username ? {
+      uid: parseInt(l.uid),
+      username: l.username,
+      access: AccessTypes[l.level + 1]
+    } : {
+      groupUid: parseInt(l.uid),
+      groupName: l.group_name as string,
+      access: AccessTypes[l.level + 1]
     }));
     
   }
@@ -484,7 +497,6 @@ export default class UserManager extends DbController {
   }
 
   async addGroup(groupName: string) {
-    if (!UserManager.isValid["groupName"](groupName)) throw new Error(`Invalid group name : ${groupName}`);
     let groupId;
     for (let i = 0; i < 3; i++) {
       //Retry 3 times in case we are unlucky with the RNG
@@ -500,104 +512,88 @@ export default class UserManager extends DbController {
         ]); break;
       } catch (e: any) {
         if (e.code == errors.unique_violation && e.constraint === "groups_group_id_key") continue;
+        else if (e.code == errors.unique_violation && e.constraint === "groups_group_name_key") {throw new ConflictError(`A group named ${groupName} already exists`)}
         else throw e;
       }
     }
-    return new StoredGroup({ groupName, groupId: groupId! });
+    return new Group({ group_name: groupName, group_id: groupId! });
   }
 
-  async removeGroup(uid: number) {
-    let r = await this.db.run(`DELETE FROM groups WHERE group_id = $1`, [uid.toString(10)]);
-    if (!r || !r.changes) throw new NotFoundError(`No group to delete with uid ${uid}`);
+  async removeGroup(group: number | string) {
+    let group_id = `(${(typeof group === "number") ? `SELECT $1::bigint AS group_id` : `SELECT group_id FROM groups WHERE group_name = $1`})`;
+    let r = await this.db.run(`DELETE FROM groups WHERE group_id = ${group_id}`, [group]);
+    if (!r || !r.changes) throw new NotFoundError(`No group ${group} to delete`);
   }
 
-  // safe 
-  async getGroup(groupName: string, safe: boolean = true): Promise<StoredGroup> {
-    if (!UserManager.isValid["groupName"](groupName)) throw new Error(`Invalid group name : ${groupName}`);
-    let group;
-    if (safe) {
-      group = (await this.db.get<StoredGroup>(`SELECT * FROM groups WHERE group_name = $1`, [groupName]));
-    } else {
-      group = (await this.db.get<StoredGroup>(
-        `SELECT 
+  async getGroup(groupName: string): Promise<Group> {
+    let bdd_group = (await this.db.get<StoredGroup>(
+      `SELECT 
         group_name,
         group_id, 
-        jsonb_object_agg (COALESCE(scene_name,''::text), access_level)  - '' as scenes,
-        array_remove(ARRAY_AGG(username), NULL)  AS members 
+        jsonb_object_agg (COALESCE(scene_name,''::text), access_level)  - '' AS scenes,
+        array_remove(ARRAY_AGG(DISTINCT username), NULL)  AS members 
         FROM groups 
         LEFT JOIN groups_acl ON groups_acl.fk_group_id = group_id
         LEFT JOIN scenes ON fk_scene_id = scene_id 
         LEFT JOIN groups_membership ON groups_membership.fk_group_id = group_id
         LEFT JOIN users ON groups_membership.fk_user_id = user_id
         WHERE group_name = $1
-        GROUP BY group_name, group_id`, [groupName]))
-        group.scenes = group.scenes ?  
-        Object.entries(group.scenes).map(([s, a], i) => {return {scene: s, access: AccessTypes[a+1]}})
-        : [];
-    }
-    if (!group) throw new NotFoundError(`no group named ${groupName}`);
-    return group;
+        GROUP BY group_name, group_id`, [groupName]));
+    if (!bdd_group) throw new NotFoundError(`no group named ${groupName}`);
+    return new Group(bdd_group);
   }
 
-  async getGroups(): Promise<StoredGroup[]> {
-    return (await this.db.all<StoredGroup>(`
-      SELECT * FROM groups`));
+  async getGroups(): Promise<Group[]> {
+    return ((await this.db.all<{ group_id: number, group_name: string }>(`
+      SELECT * FROM groups`)).map(group => new Group(group)));
   }
 
 
-  async addMemberToGroup(user: number | string, group_id: number) {
-    console.log("group_id", group_id);
+  async addMemberToGroup(user: number | string, group: number | string) {
+    let group_id = `(${(typeof group === "number") ? `SELECT $1::bigint AS group_id` : `SELECT group_id FROM groups WHERE group_name = $1`})`;
+    let user_id = `(${(typeof user === "number") ? `SELECT $2::bigint AS user_id` : `SELECT user_id FROM users WHERE username = $2`})`;
     try {
-      if (typeof (user) == "number") {
-        let r = await this.db.run(` 
-      INSERT INTO groups_membership (fk_group_id, fk_user_id)
-      VALUES ($1, $2)`,
-          [group_id, user])
-      } else {
-        let r = await this.db.run(` 
-      INSERT INTO groups_membership (fk_group_id, fk_user_id)
-      SELECT $1, user_id FROM users WHERE username = $2`,
-          [group_id, user]);
-        if (!r || !r.changes) throw new NotFoundError(`No user ${user} to add `);
-      }
+      let r = await this.db.run(` 
+        INSERT INTO groups_membership (fk_group_id, fk_user_id)
+        SELECT ${group_id}, ${user_id}`,
+        [group, user]);
+      if (!r || !r.changes) throw new NotFoundError(`No user ${user} to add `);
     }
     catch (e: any) {
-      if (e.code != errors.unique_violation) {
+      if (e.code == errors.not_null_violation && ((e.column == "fk_group_id") || (e.column == "fk_user_id"))) {
+        if (e.column == "fk_user_id") {
+          throw new NotFoundError("User " + user.toString() + " not found")
+        } else {
+          throw new NotFoundError("Group " + group.toString() + " not found")
+        }
+      }
+      else if (e.code != errors.unique_violation) {
         throw e
       }
     }
   }
 
-  async removeMemberFromGroup(user: number | string, group_id: number) {
-    let user_id = `(${(typeof user === "number") ?
-      `SELECT $1::bigint AS user_id` :
-      `SELECT user_id FROM users WHERE username = $1`})`;
+  async removeMemberFromGroup(user: number | string, group: number | string) {
+    let group_id = `(${(typeof group === "number") ? `SELECT $1::bigint AS group_id` : `SELECT group_id FROM groups WHERE group_name = $1`})`;
+    let user_id = `(${(typeof user === "number") ? `SELECT $2::bigint AS user_id` : `SELECT user_id FROM users WHERE username = $2`})`;
+
     let r = await this.db.run(`
       DELETE FROM groups_membership 
-      WHERE fk_user_id = ${user_id} AND fk_group_id = $2`, [user, group_id]);
-    if (!r || !r.changes) throw new NotFoundError(`No user ${user} to delete `);
+      WHERE fk_user_id = ${user_id} AND fk_group_id = ${group_id}`, [group, user]);
+    if (!r || !r.changes) throw new NotFoundError(`No member ${user} to delete from group ${group}`);
   }
 
-  async getMembersOfGroup(group_id: number) {
-    let r = (await this.db.all<StoredUser>(` 
-      SELECT
-        user_id, username, level, email
-      FROM 
-        users INNER JOIN groups_membership ON user_id = fk_user_id
-      WHERE fk_group_id = $1
-    `, [group_id])).map((u) => UserManager.deserialize(u));
-    return r;
-  }
-
+  /* This returns false is the group or user does not exist.
+    It should not be exposed via any API routes.
+    It is currently only used to check access rights for accessing to groups */
   async isMemberOfGroup(user: number | string, group: number | string) {
-    let res: Number;
+    let res: { fk_user_id: number };
     if (typeof (user) == "number") {
-      res = (await this.db.get<Number>(`SELECT fk_user_id FROM groups_membership ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND fk_user_id = $1`, [user, group]));
+      res = (await this.db.get<{ fk_user_id: number }>(`SELECT fk_user_id FROM groups_membership ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND fk_user_id = $1`, [user, group]));
     } else {
-      res = (await this.db.get<Number>(`SELECT fk_user_id FROM groups_membership  JOIN users ON fk_user_id = user_id  ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND username = $1`, [user, group]));
+      res = (await this.db.get<{ fk_user_id: number }>(`SELECT fk_user_id FROM groups_membership  JOIN users ON fk_user_id = user_id  ${typeof (group) == "string" ? `JOIN groups ON fk_group_id = group_id WHERE group_name = $2` : `WHERE fk_group_id = $2`} AND username = $1`, [user, group]));
     }
-    console.log(res);
-    return (typeof (res) == "number")
+    return (res && (typeof (res.fk_user_id) === "number"))
   }
 
 
@@ -650,35 +646,5 @@ export default class UserManager extends DbController {
         throw new NotFoundError(`Can't find matching group or scene`);
       }
     }
-  }
-
-
-  /**
-   * Get all group access rights for a scene.
-   * Access to this should be externally restricted to users with READ rights over this scene.
-   * 
-   * For this reason, this method is not really made safe: It won't throw a 404 if the requested scene doesn't exist.
-   * @see https://www.sqlite.org/json1.html#jeach for json_each documentation
-   */
-  async getGroupsPermissions(nameOrId: string | number): Promise<{ uid: number, groupName: string, access: AccessType }[]> {
-    let key = ((typeof nameOrId == "number") ? "scene_id" : "scene_name");
-    let r = await this.db.all<{ uid: string, group_name: string, level: number }>(`
-      SELECT 
-        groups.group_id AS uid,
-        groups.group_name AS group_name,
-        groups_acl.access_level AS level
-      FROM 
-        scenes
-        INNER JOIN groups_acl ON groups_acl.fk_scene_id = scenes.scene_id
-        INNER JOIN groups ON groups_acl.fk_user_id = groups.user_id
-      WHERE scenes.${key} = $1
-    `, [
-      (typeof nameOrId == "number") ? nameOrId.toString(10) : nameOrId,
-    ]);
-    return r.map(l => ({
-      uid: parseInt(l.uid),
-      groupName: l.group_name,
-      access: AccessTypes[l.level + 1]
-    }));
   }
 }

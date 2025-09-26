@@ -144,8 +144,8 @@ routes.get("/groups/:group", isMemberOrManage, wrap(async (req, res)=>{
   const {group} = req.params;
   const groupObj = await userManager.getGroup(group, false);
   res.render("group", {
-    name: groupObj.group_name,
-    id: groupObj.group_id,
+    name: groupObj.groupName,
+    id: groupObj.groupUid,
     manageAccess: requester? isUserAtLeast(requester, "manage"): false,
     scenes: groupObj.scenes,
     members: groupObj.members,
