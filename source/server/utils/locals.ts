@@ -57,10 +57,16 @@ export function getFileDir(req :Request) :string{
 
 export function isUser(req: Request, res:Response, next :NextFunction){
   res.append("Cache-Control", "private");
-  
   if((req.session as User).uid ) next();
   else next(new UnauthorizedError());
 }
+
+export function isUserAndCanRead(req: Request, res:Response, next :NextFunction){  
+  res.append("Cache-Control", "private");
+  if((req.session as User).uid ) canRead(req, res, next);
+  else next(new UnauthorizedError());
+}
+
 
 /**
  * Special case to allow user creation if no user exists in the database
